@@ -1,0 +1,9 @@
+{
+  "name": "PT Koç",
+  "short_name": "PT Koç",
+  "start_url": "./#/gun",
+  "display": "standalone",
+  "background_color": "#0f1115",
+  "theme_color": "#0f1115",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
