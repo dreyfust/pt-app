@@ -313,6 +313,7 @@ async function viewDay(date, tab) {
     ${seg('day', tabs.map(([k, l]) => [`#/gun/${date}/${k}`, l]), tabs.findIndex(([k]) => k === tab))}
     <div id="tab"></div>`;
   const el = $('#tab');
+  if (tab === 'antrenman') await loadLib().catch(() => {}); // kardiyo hareketlerini tanımak için
   if (tab === 'beslenme') renderNutrition(el, date, day);
   else if (tab === 'antrenman') renderWorkout(el, date, day);
   else renderMeasure(el, date, day);
@@ -354,19 +355,8 @@ function renderNutrition(el, date, day) {
       <div class="left-pill">${left >= 0 ? `Kalan <b>${cnt('left', left)}</b> kcal` : `Hedefin <b>${cnt('left', -left)}</b> kcal üstünde`}
         ${t.unknown ? `<br><small class="muted">+ ${t.unknown} öğünün makrosunu koç hesaplayacak</small>` : ''}</div>
     </div>
-    ${meals.map(mealCard).join('') || '<div class="empty-state">Bu gün için plan yok.</div>'}
-    <div class="card" id="extra-form">
-      <h3>➕ Plan dışı öğün ekle</h3>
-      <div class="grid2">
-        <div><label class="f">Öğün</label><select id="x-slot">${Object.entries(SLOTS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></div>
-        <div><label class="f">Saat</label><input id="x-time" type="time" value="${date === todayStr() ? nowTime() : '13:00'}"></div>
-      </div>
-      <label class="f">Ne yedin? (yaklaşık miktarlarla)</label>
-      <textarea id="x-text" placeholder="ör. 1 tavuk dürüm, 1 ayran"></textarea>
-      <label class="f">Kalori (biliyorsan, boş bırakırsan koç tahmin eder)</label>
-      <input id="x-kcal" type="number" inputmode="numeric" placeholder="opsiyonel">
-      <button class="btn primary full" style="margin-top:10px" data-act="add-meal">Ekle</button>
-    </div>`;
+    <button class="btn primary full add-big" data-act="open-food">＋ Yemek ekle</button>
+    ${meals.map(mealCard).join('') || '<div class="empty-state">Bu gün için plan yok.</div>'}`;
 
   el.onclick = (e) => {
     const b = e.target.closest('[data-act]');
@@ -377,12 +367,7 @@ function renderNutrition(el, date, day) {
       const status = b.dataset.status;
       const m = day.meals.find((x) => x.id === id);
       if (status === 'replaced') {
-        $('#x-slot').value = SLOTS[m.slot] ? m.slot : 'diger';
-        $('#x-time').value = m.time || nowTime();
-        $('#extra-form').dataset.replace = id;
-        $('#extra-form').scrollIntoView({ behavior: 'smooth' });
-        $('#x-text').focus();
-        toast('Yerine ne yediğini yaz');
+        openFoodSheet(date, { slot: SLOTS[m.slot] ? m.slot : 'diger', time: m.time, replaceId: id, replaceName: m.name });
         return;
       }
       const next = m.status === status ? 'planned' : status;
@@ -400,23 +385,8 @@ function renderNutrition(el, date, day) {
         await updateDay(date, `Plan dışı öğün silindi: ${m.text || m.name}`, (d) => { d.meals = d.meals.filter((x) => x.id !== id); });
         rerender();
       });
-    } else if (act === 'add-meal') {
-      const text = $('#x-text').value.trim();
-      if (!text) { toast('Ne yediğini yaz'); return; }
-      const slot = $('#x-slot').value;
-      const replaceId = $('#extra-form').dataset.replace;
-      const kcal = num($('#x-kcal').value);
-      busy(b, async () => {
-        await updateDay(date, `Plan dışı öğün eklendi (${SLOTS[slot]}): ${text}`, (d) => {
-          if (replaceId) { const r = d.meals.find((x) => x.id === replaceId); if (r) r.status = 'replaced'; }
-          d.meals.push({
-            id: uid(), slot, name: SLOTS[slot], time: $('#x-time').value, source: 'extra', status: 'eaten',
-            text, items: [], kcal, p: null, c: null, f: null, needsParse: true,
-          });
-        });
-        toast('Eklendi, koç makroları hesaplayacak');
-        rerender();
-      });
+    } else if (act === 'open-food') {
+      openFoodSheet(date);
     }
   };
 }
@@ -446,25 +416,40 @@ function mealCard(m) {
 }
 const SLOT_EMO = { kahvalti: '🍳', ogle: '🥗', ara: '🍌', aksam: '🍽️', gece: '🌙', diger: '🍴' };
 
-function setRow(i, s = {}) {
+// Kuvvet: kg × tekrar, kardiyo: dakika × km. Boş alanların ipucu son seansın değeri.
+function setRow(i, s = {}, cardio = false, last = {}) {
+  const [k1, u1, k2, u2] = cardio ? ['min', 'dk', 'km', 'km'] : ['kg', 'kg', 'reps', 'tekrar'];
   return `<tr><td>${i + 1}</td>
-    <td><input inputmode="decimal" data-k="kg" value="${s.kg ?? ''}" placeholder="kg"></td><td class="unit">kg</td>
-    <td><input inputmode="numeric" data-k="reps" value="${s.reps ?? ''}" placeholder="tekrar"></td><td class="unit">tekrar</td>
+    <td><input inputmode="decimal" data-k="${k1}" value="${s[k1] ?? ''}" placeholder="${last[k1] ?? u1}"></td><td class="unit">${u1}</td>
+    <td><input inputmode="decimal" data-k="${k2}" value="${s[k2] ?? ''}" placeholder="${last[k2] ?? u2}"></td><td class="unit">${u2}</td>
     <td><button class="btn sm" data-act="del-set" aria-label="Seti sil">×</button></td></tr>`;
+}
+
+const isCardio = (e) => e.kind === 'kardiyo' || LIB.exercises?.find((x) => x.n === e.name)?.k === 'kardiyo';
+const exLast = () => jget('pt.exLast', {});
+function rememberSets(exercises) {
+  const all = exLast();
+  for (const e of exercises) { const s = e.sets?.at(-1); if (s) all[e.name] = s; }
+  jset('pt.exLast', all);
 }
 
 function renderWorkout(el, date, day) {
   const w = day.workout || { title: 'Dinlenme günü', exercises: [] };
-  const exHtml = w.exercises.map((e, i) => `
-    <div class="ex" data-ex="${e.id}">
-      <div class="ex-h"><span class="ex-num">${i + 1}</span><b>${esc(e.name)}</b>
+  const last = exLast();
+  const exHtml = w.exercises.map((e, i) => {
+    const cardio = isCardio(e);
+    return `
+    <div class="ex" data-ex="${e.id}" data-cardio="${cardio ? 1 : ''}">
+      <div class="ex-h"><span class="ex-num">${cardio ? '🏃' : i + 1}</span><b>${esc(e.name)}</b>
         ${e.source === 'extra' ? '<span class="badge extra">Ekstra</span>' : ''}
         ${e.target ? `<span class="badge">${esc(e.target)}</span>` : ''}
         ${e.source === 'extra' ? `<button class="btn sm danger" data-act="del-ex" data-id="${e.id}">Sil</button>` : ''}</div>
       ${e.note ? `<small class="muted">${esc(e.note)}</small>` : ''}
-      <table class="sets"><tbody>${(e.sets.length ? e.sets : [{}]).map((s, i) => setRow(i, s)).join('')}</tbody></table>
-      <button class="btn sm" data-act="add-set" style="margin-top:6px">+ Set</button>
-    </div>`).join('');
+      ${last[e.name] && !e.sets.length ? `<small class="muted last-hint">Geçen sefer: ${cardio ? `${last[e.name].min ?? '?'} dk${last[e.name].km ? ` · ${last[e.name].km} km` : ''}` : `${last[e.name].kg ?? '?'} kg × ${last[e.name].reps ?? '?'}`}</small>` : ''}
+      <table class="sets"><tbody>${(e.sets.length ? e.sets : [{}]).map((s, j) => setRow(j, s, cardio, last[e.name])).join('')}</tbody></table>
+      <button class="btn sm" data-act="add-set" style="margin-top:6px">+ ${cardio ? 'Tur' : 'Set'}</button>
+    </div>`;
+  }).join('');
 
   el.innerHTML = `
     <div class="card"><div class="row"><h3 class="grow" style="margin:0">${esc(w.title)}</h3>${w.done ? '<span class="badge eaten">✓ Tamamlandı</span>' : ''}</div>
@@ -474,32 +459,22 @@ function renderWorkout(el, date, day) {
       <label class="done-toggle"><span>🏁 Antrenman bitti</span>
         <span class="switch"><input type="checkbox" id="w-done" ${w.done ? 'checked' : ''}><span></span></span></label>
       <button class="btn primary full" data-act="save-workout">💾 Antrenmanı kaydet</button>` : ''}
-    <div class="card" style="margin-top:12px">
-      <h3>➕ Programda olmayan hareket ekle</h3>
-      <label class="f">Hareket</label><input id="e-name" placeholder="ör. Cable Fly, 20 dk bisiklet" list="ex-list">
-      <datalist id="ex-list">${allExerciseNames().map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
-      <div class="grid3">
-        <div><label class="f">Set</label><input id="e-sets" type="number" inputmode="numeric" value="3"></div>
-        <div><label class="f">Tekrar</label><input id="e-reps" inputmode="numeric" placeholder="12"></div>
-        <div><label class="f">Kg</label><input id="e-kg" inputmode="decimal" placeholder="opsiyonel"></div>
-      </div>
-      <label class="f">Not (kardiyo süresi, his vb.)</label><input id="e-note" placeholder="opsiyonel">
-      <button class="btn primary full" style="margin-top:10px" data-act="add-ex">Ekle</button>
-    </div>`;
+    <button class="btn full add-big ${w.exercises.length ? '' : 'primary'}" data-act="open-ex" style="margin-top:12px">＋ Hareket ekle</button>`;
 
   const collect = () => Object.fromEntries($$('.ex', el).map((box) => [box.dataset.ex,
-    $$('tbody tr', box).map((tr) => ({ kg: num($('[data-k=kg]', tr).value), reps: num($('[data-k=reps]', tr).value) }))
-      .filter((s) => s.kg != null || s.reps != null)]));
+    $$('tbody tr', box).map((tr) => Object.fromEntries($$('[data-k]', tr).map((i) => [i.dataset.k, num(i.value)])))
+      .filter((s) => Object.values(s).some((v) => v != null))]));
 
   el.onclick = (e) => {
     const b = e.target.closest('[data-act]');
     if (!b) return;
     const act = b.dataset.act;
     if (act === 'add-set') {
-      const tbody = $('tbody', b.closest('.ex'));
-      const last = tbody.lastElementChild;
-      const prev = last ? { kg: $('[data-k=kg]', last).value, reps: $('[data-k=reps]', last).value } : {};
-      tbody.insertAdjacentHTML('beforeend', setRow(tbody.children.length, prev));
+      const box = b.closest('.ex');
+      const tbody = $('tbody', box);
+      const lastRow = tbody.lastElementChild;
+      const prev = lastRow ? Object.fromEntries($$('[data-k]', lastRow).map((i) => [i.dataset.k, i.value])) : {};
+      tbody.insertAdjacentHTML('beforeend', setRow(tbody.children.length, prev, !!box.dataset.cardio));
       tbody.lastElementChild.classList.add('new');
       vibrate(8);
     } else if (act === 'del-set') {
@@ -512,29 +487,27 @@ function renderWorkout(el, date, day) {
       const done = $('#w-done').checked;
       const n = Object.values(sets).reduce((a, s) => a + s.length, 0);
       busy(b, async () => {
-        await updateDay(date, `Antrenman kaydedildi: ${n} set${done ? ', bitti' : ''}`, (d) => {
+        const saved = await updateDay(date, `Antrenman kaydedildi: ${n} set${done ? ', bitti' : ''}`, (d) => {
           for (const ex of d.workout.exercises) if (sets[ex.id]) ex.sets = sets[ex.id];
           d.workout.done = done;
         });
+        rememberSets(saved.workout.exercises);
         if (done && !w.done) { confetti(); vibrate([20, 40, 20]); toast('Antrenman tamam, helal olsun 🔥'); } else toast('Kaydedildi 💪');
         rerender();
       });
-    } else if (act === 'add-ex') {
-      const name = $('#e-name').value.trim();
-      if (!name) { toast('Hareket adını yaz'); return; }
-      const count = Math.max(0, Math.min(10, num($('#e-sets').value) || 0));
-      const reps = num($('#e-reps').value);
-      const kg = num($('#e-kg').value);
-      const note = $('#e-note').value.trim();
-      const pendingSets = $$('.ex', el).length ? collect() : {};
-      busy(b, async () => {
-        await updateDay(date, `Ekstra hareket: ${name} ${count}x${reps ?? '?'}${kg != null ? ` @${kg}kg` : ''}${note ? ` (${note})` : ''}`, (d) => {
+    } else if (act === 'open-ex') {
+      // Penceredeki seçim kaydedilirken ekranda girilmiş ama kaydedilmemiş setler kaybolmasın
+      openExerciseSheet(async (ex, what) => {
+        const pendingSets = collect();
+        const saved = await updateDay(date, what, (d) => {
           d.workout ||= { planId: null, title: 'Dinlenme günü', done: false, exercises: [] };
-          for (const ex of d.workout.exercises) if (pendingSets[ex.id]) ex.sets = pendingSets[ex.id];
-          d.workout.exercises.push({ id: uid(), name, source: 'extra', target: '', note, sets: Array.from({ length: count }, () => ({ kg, reps })) });
+          for (const x of d.workout.exercises) if (pendingSets[x.id]) x.sets = pendingSets[x.id];
+          d.workout.exercises.push(ex);
         });
-        toast('Hareket eklendi');
+        rememberSets([ex]);
+        toast(`${ex.name} eklendi 💪`);
         rerender();
+        return saved;
       });
     } else if (act === 'del-ex') {
       if (!confirm('Bu hareket silinsin mi?')) return;
@@ -545,10 +518,6 @@ function renderWorkout(el, date, day) {
       });
     }
   };
-}
-
-function allExerciseNames() {
-  return [...new Set(Object.values(S.plans.workout.workouts || {}).flatMap((w) => w.exercises.map((e) => e.name)))];
 }
 
 function renderMeasure(el, date, day) {
@@ -803,6 +772,414 @@ async function viewSettings() {
   }
 }
 
+// ---------- Hazır listeler: yemek ve hareket ----------
+// Yemek: m = 100 g başına [kcal, protein, karb, yağ], u = [[porsiyon adı, gram], ...]
+const LIB = { foods: null, exercises: null };
+const norm = (s) => String(s ?? '').toLocaleLowerCase('tr').replace(/ı/g, 'i').normalize('NFD').replace(/[̀-ͯ]/g, '');
+const jget = (k, d) => { try { return JSON.parse(store.get(k)) ?? d; } catch { return d; } };
+const jset = (k, v) => store.set(k, JSON.stringify(v));
+const MUSCLES = ['Tümü', 'Göğüs', 'Sırt', 'Omuz', 'Kol', 'Bacak', 'Kalça', 'Karın', 'Kardiyo', 'Tüm vücut'];
+
+async function loadLib() {
+  if (LIB.foods) return LIB;
+  const get = (p) => fetch(p).then((r) => (r.ok ? r.json() : []));
+  const [foods, exercises, custom] = await Promise.all([
+    get('data/foods.json'), get('data/exercises.json'), readJSON('data/foods-custom.json').catch(() => null),
+  ]);
+  // Koçun daha önce hesaplayıp eklediği yemekler (veri reposunda, kişiye özel)
+  LIB.foods = [...(custom?.data || []).map((f) => ({ ...f, cat: 'Koçun ekledikleri' })), ...foods];
+  LIB.exercises = exercises;
+  return LIB;
+}
+
+function searchList(list, q, fields) {
+  const tokens = norm(q).split(/\s+/).filter(Boolean);
+  return list
+    .map((it) => {
+      const hay = norm(fields.map((f) => it[f]).join(' '));
+      if (!tokens.every((t) => hay.includes(t))) return null;
+      return [norm(it[fields[0]]).startsWith(tokens[0]) ? 0 : 1, it];
+    })
+    .filter(Boolean).sort((a, b) => a[0] - b[0]).map((x) => x[1]);
+}
+
+const units = (food) => (food.u.some((u) => u[1] === 100 && u[0] === '100 g') ? food.u : [...food.u, ['100 g', 100]]);
+function macrosFor(food, ui, qty) {
+  const g = units(food)[ui][1] * qty;
+  const [k, p, c, f] = food.m.map((v) => (v * g) / 100);
+  return { g: Math.round(g), kcal: Math.round(k), p: Math.round(p), c: Math.round(c), f: Math.round(f) };
+}
+// "1 kase" × 1,5 → "1,5 kase"; "yarım" × 2 → "2 × yarım"
+function portionLabel(food, ui, qty) {
+  const u = units(food)[ui][0];
+  if (qty === 1) return u;
+  const q = String(qty).replace('.', ',');
+  return u.startsWith('1 ') ? `${q} ${u.slice(2)}` : `${q} × ${u}`;
+}
+const guessSlot = () => {
+  const h = +nowTime().slice(0, 2);
+  return h < 5 ? 'gece' : h < 11 ? 'kahvalti' : h < 15 ? 'ogle' : h < 18 ? 'ara' : h < 22 ? 'aksam' : 'gece';
+};
+
+// Alttan açılan pencere
+let sheetEls = null;
+let scanStop = null;
+function openSheet() {
+  closeSheet(true);
+  document.body.insertAdjacentHTML('beforeend', '<div class="sheet-bg"></div><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div><div class="sheet-in"></div></div>');
+  const bg = document.body.lastElementChild.previousElementSibling;
+  const sheet = document.body.lastElementChild;
+  sheetEls = { bg, sheet };
+  document.body.classList.add('noscroll');
+  bg.onclick = () => closeSheet();
+  // Tutamaçtan aşağı sürükleyerek kapat
+  const grab = $('.grab', sheet);
+  let y0 = null;
+  grab.addEventListener('touchstart', (e) => { y0 = e.touches[0].clientY; sheet.style.transition = 'none'; }, { passive: true });
+  grab.addEventListener('touchmove', (e) => { if (y0 != null) sheet.style.transform = `translateY(${Math.max(0, e.touches[0].clientY - y0)}px)`; }, { passive: true });
+  grab.addEventListener('touchend', (e) => {
+    const dy = e.changedTouches[0].clientY - y0;
+    y0 = null; sheet.style.transition = ''; sheet.style.transform = '';
+    if (dy > 90) closeSheet();
+  });
+  return $('.sheet-in', sheet);
+}
+function closeSheet(now) {
+  scanStop?.();
+  if (!sheetEls) return;
+  const { bg, sheet } = sheetEls;
+  sheetEls = null;
+  document.body.classList.remove('noscroll');
+  if (now || reduced) { bg.remove(); sheet.remove(); return; }
+  bg.classList.add('out'); sheet.classList.add('out');
+  setTimeout(() => { bg.remove(); sheet.remove(); }, 300);
+}
+// Yazarken sadece çipleri ve listeyi yenile: arama kutusu odağını korur, satırlar yeniden animasyon oynatmaz
+function refreshList(body, listHtml) {
+  const tmp = document.createElement('div');
+  tmp.innerHTML = listHtml();
+  $('.chips', body).replaceWith($('.chips', tmp));
+  const list = $('.flist', tmp);
+  list.classList.add('quiet');
+  $('.flist', body).replaceWith(list);
+}
+const sheetTabs = (items, sel) => `<div class="seg" style="--n:${items.length};--sel:${sel}"><span class="ind"></span>
+  ${items.map(([k, l], i) => `<button class="${i === sel ? 'on' : ''}" data-mode="${k}">${l}</button>`).join('')}</div>`;
+
+// ---- Yemek penceresi ----
+function openFoodSheet(date, { slot, time, replaceId, replaceName } = {}) {
+  const st = {
+    mode: 'liste', q: '', cat: 'Son', basket: [], detail: null,
+    slot: slot || guessSlot(), time: time || (date === todayStr() ? nowTime() : '13:00'),
+  };
+  const body = openSheet();
+  body.innerHTML = skeleton(48, 40, 300);
+  loadLib().then(draw).catch((e) => { body.innerHTML = `<div class="empty-state">⚠️ ${esc(e.message)}</div>`; });
+
+  const recents = () => jget('pt.recentFoods', []);
+  const favs = () => jget('pt.favFoods', []);
+  const isFav = (food) => favs().some((f) => f.n === food.n);
+  const toggleFav = (food) => {
+    const list = favs();
+    jset('pt.favFoods', isFav(food) ? list.filter((f) => f.n !== food.n) : [food, ...list].slice(0, 50));
+  };
+
+  function rowsFor() {
+    if (st.q) return searchList(LIB.foods, st.q, ['n', 'a', 'cat']).slice(0, 50).map((f) => ({ food: f, ui: 0, qty: 1 }));
+    if (st.cat === 'Son') return recents().map((r) => ({ food: r.f, ui: r.ui, qty: r.q }));
+    if (st.cat === 'Favori') return favs().map((f) => ({ food: f, ui: 0, qty: 1 }));
+    return LIB.foods.filter((f) => f.cat === st.cat).map((f) => ({ food: f, ui: 0, qty: 1 }));
+  }
+
+  function listHtml() {
+    const cats = ['Son', 'Favori', ...new Set(LIB.foods.map((f) => f.cat))];
+    const rows = rowsFor();
+    st.rows = rows;
+    const empty = st.q
+      ? `<div class="empty-state">"${esc(st.q)}" listede yok.<br><button class="btn sm" data-x="to-free" style="margin-top:8px">✍️ Serbest yaz, koç hesaplasın</button></div>`
+      : st.cat === 'Son' ? '<div class="empty-state">Henüz bir şey eklemedin. Yukarıdan ara ya da kategori seç.</div>'
+        : '<div class="empty-state">Favori yok. Yemeklerin yanındaki ★ ile ekle.</div>';
+    return `
+      <input class="search" id="f-q" type="search" placeholder="Ara: mercimek, döner, muz…" value="${esc(st.q)}" autocomplete="off">
+      <div class="chips">${cats.map((c) => `<button class="chip ${!st.q && c === st.cat ? 'on' : ''}" data-cat="${esc(c)}">${c === 'Son' ? '🕘 Son' : c === 'Favori' ? '★ Favori' : esc(c)}</button>`).join('')}</div>
+      <div class="flist">${rows.length ? rows.map((r, i) => {
+        const mm = macrosFor(r.food, r.ui, r.qty);
+        return `<div class="frow" data-i="${i}" style="--i:${Math.min(i, 12)}">
+          <div class="fmain"><b>${esc(r.food.n)}</b><small>${esc(portionLabel(r.food, r.ui, r.qty))} · ${mm.kcal} kcal · P ${mm.p}</small></div>
+          <button class="fav ${isFav(r.food) ? 'on' : ''}" data-fav="${i}" aria-label="Favori">★</button>
+          <button class="fadd" data-quick="${i}" aria-label="Hızlı ekle">＋</button></div>`;
+      }).join('') : empty}</div>`;
+  }
+
+  function detailHtml() {
+    const { food, ui, qty } = st.detail;
+    const mm = macrosFor(food, ui, qty);
+    return `
+      <button class="btn sm" data-x="back">‹ Listeye dön</button>
+      <h3 style="margin:12px 0 2px">${esc(food.n)}</h3><small class="muted">${esc(food.cat || '')}</small>
+      <label class="f">Porsiyon</label>
+      <div class="chips wrap">${units(food).map((u, i) => `<button class="chip ${i === ui ? 'on' : ''}" data-unit="${i}">${esc(u[0])}${/\d\s*g$/.test(u[0]) ? '' : ` <small>${u[1]} g</small>`}</button>`).join('')}</div>
+      <label class="f">Miktar</label>
+      <div class="stepper"><button data-qty="-">−</button><b>${qty}</b><button data-qty="+">+</button></div>
+      <div class="mgrid">
+        <div><b>${cnt('d-k', mm.kcal)}</b><small>kcal</small></div>
+        <div style="--c:var(--p)"><b>${cnt('d-p', mm.p)}</b><small>protein</small></div>
+        <div style="--c:var(--c)"><b>${cnt('d-c', mm.c)}</b><small>karb.</small></div>
+        <div style="--c:var(--f)"><b>${cnt('d-f', mm.f)}</b><small>yağ</small></div>
+      </div>
+      <small class="muted">${mm.g} g</small>
+      <button class="btn primary full" data-x="to-basket" style="margin-top:12px">Sepete ekle</button>`;
+  }
+
+  function barcodeHtml() {
+    const can = 'BarcodeDetector' in window && navigator.mediaDevices?.getUserMedia;
+    return `
+      <p class="muted" style="margin:4px 0 10px">Paketli ürünün barkodunu okut ya da numarasını yaz. Besin değerleri Open Food Facts'ten gelir.</p>
+      ${can ? '<button class="btn primary full" data-x="scan">📷 Kamerayla tara</button><video id="bc-video" playsinline muted></video>'
+        : '<small class="muted">Bu tarayıcı kamerayla barkod okumayı desteklemiyor (iPhone Safari gibi). Numarayı elle yazabilirsin.</small>'}
+      <div class="row" style="margin-top:10px"><input id="bc-code" inputmode="numeric" placeholder="8690000000000" class="grow" style="flex:1"><button class="btn" data-x="lookup">Ara</button></div>
+      <div id="bc-status" class="muted" style="margin-top:8px"></div>`;
+  }
+
+  function freeHtml() {
+    return `
+      <p class="muted" style="margin:4px 0 0">Listede olmayan ya da karışık bir şey yediysen yaz, koç kalorisini hesaplasın.</p>
+      <label class="f">Ne yedin? (yaklaşık miktarlarla)</label>
+      <textarea id="x-text" placeholder="ör. annemin kuru fasulyesi 1 tabak, yarım ekmek">${esc(st.freeText || '')}</textarea>
+      <label class="f">Kalori (biliyorsan)</label>
+      <input id="x-kcal" type="number" inputmode="numeric" placeholder="boş bırakırsan koç tahmin eder">`;
+  }
+
+  function footerHtml() {
+    const tot = st.basket.reduce((a, b) => { const m = macrosFor(b.food, b.ui, b.qty); a.kcal += m.kcal; a.p += m.p; return a; }, { kcal: 0, p: 0 });
+    const free = st.mode === 'serbest';
+    if (!free && !st.basket.length) return replaceId ? `<div class="sheet-foot"><small class="muted">"${esc(replaceName)}" yerine ne yediğini seç.</small></div>` : '';
+    return `<div class="sheet-foot">
+      ${!free ? `<div class="bitems">${st.basket.map((b, i) => `<span class="bchip">${esc(b.food.n)} · ${esc(portionLabel(b.food, b.ui, b.qty))}<i data-rm="${i}">✕</i></span>`).join('')}</div>` : ''}
+      <div class="grid2">
+        <select id="f-slot">${Object.entries(SLOTS).map(([k, v]) => `<option value="${k}" ${k === st.slot ? 'selected' : ''}>${v}</option>`).join('')}</select>
+        <input id="f-time" type="time" value="${st.time}">
+      </div>
+      <button class="btn primary full" data-x="save" style="margin-top:8px">${free ? 'Kaydet' : `Kaydet · ${tot.kcal} kcal · P ${tot.p}`}</button></div>`;
+  }
+
+  function draw() {
+    const modes = [['liste', '🔎 Liste'], ['barkod', '▥ Barkod'], ['serbest', '✍️ Serbest']];
+    const content = st.mode === 'liste' ? (st.detail ? detailHtml() : listHtml()) : st.mode === 'barkod' ? barcodeHtml() : freeHtml();
+    body.innerHTML = `
+      <div class="sheet-h"><b>${replaceId ? `${esc(replaceName)} yerine` : 'Yemek ekle'}</b><button class="icon" data-x="close" aria-label="Kapat">✕</button></div>
+      ${sheetTabs(modes, modes.findIndex(([k]) => k === st.mode))}
+      <div class="sheet-body">${content}</div>
+      ${footerHtml()}`;
+    $$('[data-count]', body).forEach(countUp);
+    const q = $('#f-q', body);
+    if (q) q.oninput = () => { st.q = q.value; refreshList(body, listHtml); };
+  }
+
+  function addToBasket(item) {
+    st.basket.push(item);
+    vibrate(10);
+    toast(`${item.food.n} sepette`);
+  }
+
+  async function lookupBarcode(code) {
+    const status = $('#bc-status', body);
+    if (!/^\d{6,14}$/.test(code)) { status.textContent = 'Geçerli bir barkod numarası yaz.'; return; }
+    status.textContent = 'Aranıyor…';
+    try {
+      const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${code}.json?fields=product_name,brands,nutriments,serving_quantity`);
+      const j = await r.json();
+      const p = j.product;
+      const n = p?.nutriments || {};
+      if (!p || n['energy-kcal_100g'] == null) { status.textContent = 'Ürün bulunamadı ya da besin değeri yok. Serbest yazabilirsin.'; return; }
+      const food = {
+        n: p.product_name || p.brands?.split(',')[0] || `Ürün ${code}`,
+        cat: 'Paketli ürün',
+        m: [n['energy-kcal_100g'], n.proteins_100g || 0, n.carbohydrates_100g || 0, n.fat_100g || 0],
+        u: p.serving_quantity ? [['1 porsiyon', +p.serving_quantity]] : [['100 g', 100]],
+      };
+      scanStop?.();
+      st.mode = 'liste'; st.detail = { food, ui: 0, qty: 1 };
+      draw();
+    } catch {
+      status.textContent = 'Bağlantı hatası, tekrar dene.';
+    }
+  }
+
+  async function startScan() {
+    const video = $('#bc-video', body);
+    const status = $('#bc-status', body);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      video.srcObject = stream;
+      video.classList.add('on');
+      await video.play();
+      const det = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e'] });
+      let alive = true;
+      scanStop = () => { alive = false; stream.getTracks().forEach((t) => t.stop()); scanStop = null; };
+      status.textContent = 'Barkodu kameraya göster…';
+      while (alive) {
+        const codes = await det.detect(video).catch(() => []);
+        if (codes[0]) { vibrate(30); const c = codes[0].rawValue; scanStop(); $('#bc-code', body).value = c; lookupBarcode(c); return; }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    } catch {
+      status.textContent = 'Kamera açılamadı. Numarayı elle yazabilirsin.';
+    }
+  }
+
+  async function save(btn) {
+    st.slot = $('#f-slot', body).value;
+    st.time = $('#f-time', body).value;
+    const newId = uid();
+    let meal, what;
+    if (st.mode === 'serbest') {
+      const text = $('#x-text', body).value.trim();
+      if (!text) { toast('Ne yediğini yaz'); return; }
+      meal = { text, items: [], kcal: num($('#x-kcal', body).value), p: null, c: null, f: null, needsParse: true };
+      what = `Plan dışı öğün eklendi (${SLOTS[st.slot]}): ${text}`;
+    } else {
+      const sum = { kcal: 0, p: 0, c: 0, f: 0 };
+      const items = st.basket.map((b) => {
+        const m = macrosFor(b.food, b.ui, b.qty);
+        for (const k of Object.keys(sum)) sum[k] += m[k];
+        return { name: b.food.n, amount: `${portionLabel(b.food, b.ui, b.qty)} (${m.g} g)` };
+      });
+      meal = { items, ...sum, fromDb: true, needsParse: false };
+      what = `Listeden eklendi (${SLOTS[st.slot]}): ${items.map((i) => `${i.name} ${i.amount}`).join(', ')} = ${sum.kcal} kcal`;
+      const rec = recents().filter((r) => !st.basket.some((b) => b.food.n === r.f.n));
+      jset('pt.recentFoods', [...st.basket.map((b) => ({ f: b.food, ui: b.ui, q: b.qty })), ...rec].slice(0, 25));
+    }
+    await busy(btn, async () => {
+      await updateDay(date, what, (d) => {
+        if (replaceId) { const r = d.meals.find((x) => x.id === replaceId); if (r) r.status = 'replaced'; }
+        d.meals.push({ id: newId, slot: st.slot, name: SLOTS[st.slot], time: st.time, source: 'extra', status: 'eaten', ...meal });
+      });
+      closeSheet();
+      A.flash = newId;
+      vibrate(15);
+      toast(meal.fromDb ? `Eklendi · ${meal.kcal} kcal` : 'Eklendi, koç makroları hesaplayacak');
+      rerender();
+    });
+  }
+
+  body.onclick = (e) => {
+    const t = e.target.closest('[data-x],[data-mode],[data-cat],[data-i],[data-unit],[data-qty],[data-rm]');
+    if (!t) return;
+    const d = t.dataset;
+    if (d.mode) { if (st.mode === 'serbest') st.freeText = $('#x-text', body)?.value; scanStop?.(); st.mode = d.mode; draw(); return; }
+    if (d.cat) { st.cat = d.cat; st.q = ''; draw(); return; }
+    if (d.rm != null) { st.basket.splice(+d.rm, 1); draw(); return; }
+    if (d.unit != null) { st.detail.ui = +d.unit; draw(); return; }
+    if (d.qty) { st.detail.qty = Math.max(0.5, st.detail.qty + (d.qty === '+' ? 0.5 : -0.5)); vibrate(5); draw(); return; }
+    if (d.i != null) {
+      const fav = e.target.closest('[data-fav]');
+      const quick = e.target.closest('[data-quick]');
+      const row = st.rows[+d.i];
+      if (fav) { toggleFav(row.food); draw(); return; }
+      if (quick) { addToBasket({ ...row }); quick.classList.add('popped'); setTimeout(draw, 250); return; }
+      st.detail = { ...row };
+      draw();
+      return;
+    }
+    switch (d.x) {
+      case 'close': closeSheet(); break;
+      case 'back': st.detail = null; draw(); break;
+      case 'to-basket': addToBasket({ ...st.detail }); st.detail = null; draw(); break;
+      case 'to-free': st.freeText = st.q; st.mode = 'serbest'; draw(); break;
+      case 'scan': startScan(); break;
+      case 'lookup': lookupBarcode($('#bc-code', body).value.trim()); break;
+      case 'save': save(t); break;
+      default:
+    }
+  };
+}
+
+// ---- Hareket penceresi ----
+function openExerciseSheet(onAdd) {
+  const st = { q: '', m: 'Tümü', detail: null };
+  const body = openSheet();
+  body.innerHTML = skeleton(48, 40, 300);
+  loadLib().then(draw).catch((e) => { body.innerHTML = `<div class="empty-state">⚠️ ${esc(e.message)}</div>`; });
+
+  function listHtml() {
+    let rows = st.m === 'Tümü' ? LIB.exercises : LIB.exercises.filter((x) => x.m === st.m);
+    if (st.q) rows = searchList(rows, st.q, ['n', 'tr', 'm']);
+    st.rows = rows;
+    const custom = st.q && !rows.some((r) => norm(r.n) === norm(st.q))
+      ? `<div class="frow" data-custom="1"><div class="fmain"><b>＋ "${esc(st.q)}"</b><small>Listede yok, bu adla ekle</small></div></div>` : '';
+    const last = exLast();
+    return `
+      <input class="search" id="e-q" type="search" placeholder="Ara: bench, barfiks, koşu…" value="${esc(st.q)}" autocomplete="off">
+      <div class="chips">${MUSCLES.map((m) => `<button class="chip ${m === st.m ? 'on' : ''}" data-m="${m}">${m}</button>`).join('')}</div>
+      <div class="flist">${custom}${rows.map((r, i) => `<div class="frow" data-i="${i}" style="--i:${Math.min(i, 12)}">
+        <div class="fmain"><b>${esc(r.n)}</b><small>${esc(r.tr)} · ${r.m}${last[r.n] ? ` · son: ${r.k === 'kardiyo' ? `${last[r.n].min ?? '?'} dk` : `${last[r.n].kg ?? '?'} kg × ${last[r.n].reps ?? '?'}`}` : ''}</small></div>
+        <span class="fadd">›</span></div>`).join('')}</div>`;
+  }
+
+  function detailHtml() {
+    const ex = st.detail;
+    const last = exLast()[ex.n] || {};
+    const cardio = ex.k === 'kardiyo';
+    return `
+      <button class="btn sm" data-x="back">‹ Listeye dön</button>
+      <h3 style="margin:12px 0 2px">${esc(ex.n)}</h3><small class="muted">${esc(ex.tr || '')} · ${ex.m}</small>
+      ${cardio ? `
+        <div class="grid2">
+          <div><label class="f">Süre (dk)</label><input id="x-min" inputmode="decimal" value="${last.min ?? 30}"></div>
+          <div><label class="f">Mesafe (km)</label><input id="x-km" inputmode="decimal" value="${last.km ?? ''}" placeholder="opsiyonel"></div>
+        </div>` : `
+        <label class="f">Set sayısı</label>
+        <div class="stepper"><button data-sets="-">−</button><b id="x-sets">${st.sets ?? 3}</b><button data-sets="+">+</button></div>
+        <div class="grid2">
+          <div><label class="f">Ağırlık (kg)</label><input id="x-kg" inputmode="decimal" value="${last.kg ?? ''}" placeholder="vücut ağırlığı ise boş"></div>
+          <div><label class="f">Tekrar</label><input id="x-reps" inputmode="numeric" value="${last.reps ?? ''}" placeholder="12"></div>
+        </div>`}
+      <label class="f">Not</label><input id="x-note" placeholder="opsiyonel (his, eğim, tempo…)">
+      <button class="btn primary full" data-x="add" style="margin-top:12px">Antrenmana ekle</button>`;
+  }
+
+  function draw() {
+    body.innerHTML = `
+      <div class="sheet-h"><b>Hareket ekle</b><button class="icon" data-x="close" aria-label="Kapat">✕</button></div>
+      <div class="sheet-body">${st.detail ? detailHtml() : listHtml()}</div>`;
+    const q = $('#e-q', body);
+    if (q) q.oninput = () => { st.q = q.value; refreshList(body, listHtml); };
+  }
+
+  body.onclick = async (e) => {
+    const t = e.target.closest('[data-x],[data-m],[data-i],[data-custom],[data-sets]');
+    if (!t) return;
+    const d = t.dataset;
+    if (d.m) { st.m = d.m; draw(); return; }
+    if (d.custom) { st.detail = { n: st.q.trim(), tr: 'Listede olmayan hareket', m: 'Diğer' }; st.sets = 3; draw(); return; }
+    if (d.i != null) { st.detail = st.rows[+d.i]; st.sets = 3; draw(); return; }
+    if (d.sets) { st.sets = Math.max(1, Math.min(10, (st.sets ?? 3) + (d.sets === '+' ? 1 : -1))); $('#x-sets', body).textContent = st.sets; vibrate(5); return; }
+    if (d.x === 'close') { closeSheet(); return; }
+    if (d.x === 'back') { st.detail = null; draw(); return; }
+    if (d.x === 'add') {
+      const ex = st.detail;
+      const cardio = ex.k === 'kardiyo';
+      const note = $('#x-note', body).value.trim();
+      let sets, what;
+      if (cardio) {
+        const s = { min: num($('#x-min', body).value), km: num($('#x-km', body).value) };
+        sets = [s];
+        what = `Ekstra kardiyo: ${ex.n} ${s.min ?? '?'} dk${s.km ? `, ${s.km} km` : ''}`;
+      } else {
+        const s = { kg: num($('#x-kg', body).value), reps: num($('#x-reps', body).value) };
+        sets = Array.from({ length: st.sets ?? 3 }, () => ({ ...s }));
+        what = `Ekstra hareket: ${ex.n} ${sets.length}x${s.reps ?? '?'}${s.kg != null ? ` @${s.kg}kg` : ''}`;
+      }
+      if (note) what += ` (${note})`;
+      await busy(t, async () => {
+        await onAdd({ id: uid(), name: ex.n, source: 'extra', target: '', note, sets, ...(cardio ? { kind: 'kardiyo' } : {}) }, what);
+        closeSheet();
+      });
+    }
+  };
+}
+
 // ---------- Yönlendirme ----------
 let current = async () => {};
 // Kaydetme sonrası yeniden çizim: giriş animasyonu yok, halkalar/sayılar eski değerden akar
@@ -878,7 +1255,7 @@ document.addEventListener('pointerdown', (e) => {
 let touch = null;
 document.addEventListener('touchstart', (e) => {
   const t = e.touches[0];
-  touch = t && !e.target.closest('input, textarea, select, .sets') ? { x: t.clientX, y: t.clientY, at: Date.now() } : null;
+  touch = t && !sheetEls && !e.target.closest('input, textarea, select, .sets') ? { x: t.clientX, y: t.clientY, at: Date.now() } : null;
 }, { passive: true });
 document.addEventListener('touchend', (e) => {
   if (!touch) return;
