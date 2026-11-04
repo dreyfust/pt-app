@@ -208,22 +208,109 @@ async function busy(btn, fn) {
   }
 }
 
+// ---------- Animasyon ----------
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+// quiet: kaydetme sonrası yeniden çizimde giriş animasyonu oynatma; prev: halka/sayıların önceki değerleri (oradan akarlar)
+const A = { quiet: false, dir: '', loading: false, flash: null, prev: {}, nums: {}, seg: {} };
+const vibrate = (p = 12) => { try { navigator.vibrate?.(p); } catch { /* desteklenmiyor */ } };
+const skeleton = (...hs) => hs.map((h) => `<div class="skel" style="height:${h}px"></div>`).join('');
+
+// Sayı: önceki değerinden yenisine sayarak akar
+function cnt(key, val, dec = 0, sign = false) {
+  const from = A.nums[key] ?? 0;
+  A.nums[key] = val ?? 0;
+  return `<span data-count="${val ?? 0}" data-from="${from}" data-dec="${dec}"${sign ? ' data-sign="1"' : ''}>${(+from).toFixed(dec)}</span>`;
+}
+
+function ring(key, val, target, { size = 132, stroke = 12, color = 'var(--accent)', center } = {}) {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const off = c * (1 - Math.min(1, target ? Math.max(0, val) / target : 0));
+  const from = A.prev[key] ?? c;
+  A.prev[key] = off;
+  const h = size / 2;
+  return `<div class="ring ${target && val > target * 1.05 ? 'over' : ''}" style="--size:${size}px">
+    <svg viewBox="0 0 ${size} ${size}"><circle class="trk" cx="${h}" cy="${h}" r="${r}" stroke-width="${stroke}"/>
+      <circle class="val" cx="${h}" cy="${h}" r="${r}" stroke-width="${stroke}" style="color:${color};stroke:${color}"
+        stroke-dasharray="${c}" stroke-dashoffset="${from}" data-to="${off}"/></svg>
+    <div class="ring-c">${center ?? ''}</div></div>`;
+}
+
+function seg(key, items, sel) {
+  const from = A.seg[key] ?? sel;
+  A.seg[key] = sel;
+  return `<div class="seg" style="--n:${items.length};--sel:${from}" data-sel="${sel}"><span class="ind"></span>
+    ${items.map(([href, label], i) => `<button class="${i === sel ? 'on' : ''}" data-href="${href}">${label}</button>`).join('')}</div>`;
+}
+
+function countUp(el) {
+  const to = +el.dataset.count, from = +el.dataset.from, dec = +el.dataset.dec || 0;
+  const fmt = (v) => (el.dataset.sign && v > 0 ? '+' : '') + v.toFixed(dec);
+  if (reduced || from === to) { el.textContent = fmt(to); return; }
+  const t0 = performance.now();
+  const step = (t) => {
+    const k = Math.min(1, (t - t0) / 900);
+    el.textContent = fmt(from + (to - from) * (1 - (1 - k) ** 3));
+    if (k < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function animateIn(root) {
+  const tab = $('#tab', root);
+  if (!A.quiet && !reduced) {
+    [...root.children].forEach((el, i) => el.style.setProperty('--i', i));
+    if (tab) { tab.classList.add('stagger'); [...tab.children].forEach((el, i) => el.style.setProperty('--i', i + 2)); }
+    root.classList.remove('enter', 'from-left', 'from-right');
+    void root.offsetWidth; // animasyonu yeniden başlat
+    root.classList.add('enter');
+    if (A.dir) root.classList.add(A.dir);
+  } else {
+    root.classList.remove('enter', 'from-left', 'from-right');
+  }
+  $$('svg.chart .line', root).forEach((p) => p.style.setProperty('--len', p.getTotalLength()));
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    $$('.ring .val', root).forEach((c) => { c.style.strokeDashoffset = c.dataset.to; });
+    $$('.seg[data-sel]', root).forEach((s) => s.style.setProperty('--sel', s.dataset.sel));
+  }));
+  $$('[data-count]', root).forEach(countUp);
+}
+
+function confetti() {
+  if (reduced) return;
+  const colors = ['#22c55e', '#38bdf8', '#a78bfa', '#f59e0b', '#f472b6'];
+  for (let i = 0; i < 70; i++) {
+    const d = document.createElement('i');
+    d.className = 'confetti';
+    d.style.left = `${Math.random() * 100}vw`;
+    d.style.background = colors[i % colors.length];
+    d.style.setProperty('--x', `${Math.random() * 160 - 80}px`);
+    d.style.setProperty('--r', `${Math.random() * 900 - 450}deg`);
+    d.style.setProperty('--d', `${1.4 + Math.random() * 1.3}s`);
+    d.style.animationDelay = `${Math.random() * 0.35}s`;
+    document.body.appendChild(d);
+    setTimeout(() => d.remove(), 3200);
+  }
+}
+
+const refreshBtn = () => `<button class="icon ${A.loading ? 'spin' : ''}" data-act="refresh" aria-label="Yenile">⟳</button>`;
+
 // ---------- Gün görünümü ----------
 async function viewDay(date, tab) {
   tab = tab || 'beslenme';
   const isToday = date === todayStr();
   setTop(`
-    <button class="icon" data-href="#/gun/${addDays(date, -1)}/${tab}" aria-label="Önceki gün">‹</button>
-    <div class="title"><b>${fmtDate(date)}</b>${isToday ? '<small>Bugün</small>' : `<small><a href="#/gun" style="color:inherit">Bugüne dön</a></small>`}</div>
-    <button class="icon" data-act="refresh" aria-label="Yenile">⟳</button>
-    <button class="icon" data-href="#/gun/${addDays(date, 1)}/${tab}" aria-label="Sonraki gün">›</button>`);
-  view().innerHTML = '<div class="loading">Yükleniyor…</div>';
+    <button class="icon" data-href="#/gun/${addDays(date, -1)}/${tab}" data-dir="from-left" aria-label="Önceki gün">‹</button>
+    <div class="title"><b>${fmtDate(date)}</b>${isToday ? '<small>Bugün</small>' : `<small><a href="#/gun">Bugüne dön</a></small>`}</div>
+    ${refreshBtn()}
+    <button class="icon" data-href="#/gun/${addDays(date, 1)}/${tab}" data-dir="from-right" aria-label="Sonraki gün">›</button>`);
+  if (!S.days[date]) view().innerHTML = skeleton(56, 180, 150, 150);
   const day = await getDay(date);
 
   const tabs = [['beslenme', '🍽 Beslenme'], ['antrenman', '🏋️ Antrenman'], ['olcum', '⚖️ Ölçüm']];
   view().innerHTML = `
     ${coachCard(day)}
-    <div class="seg">${tabs.map(([k, l]) => `<button class="${k === tab ? 'on' : ''}" data-href="#/gun/${date}/${k}">${l}</button>`).join('')}</div>
+    ${seg('day', tabs.map(([k, l]) => [`#/gun/${date}/${k}`, l]), tabs.findIndex(([k]) => k === tab))}
     <div id="tab"></div>`;
   const el = $('#tab');
   if (tab === 'beslenme') renderNutrition(el, date, day);
@@ -236,30 +323,36 @@ function coachCard(day) {
   const when = c?.updatedAt ? new Date(c.updatedAt).toLocaleTimeString('tr-TR', { timeZone: TZ, hour: '2-digit', minute: '2-digit' }) : '';
   const msg = c?.message ? `<div class="md">${md(c.message)}</div>` : '';
   if (day.pending) {
-    return `<div class="card coach wait"><div class="coach-h"><span>⏳ Koç değerlendiriyor…</span><small>1-3 dk sonra ⟳</small></div>${msg ? `<div style="opacity:.6">${msg}</div>` : ''}</div>`;
+    return `<div class="card coach wait"><div class="coach-h"><span><span class="av">🧠</span>Koç düşünüyor<span class="typing"><i></i><i></i><i></i></span></span>
+      <small class="muted">1-3 dk · ⟳</small></div>${msg ? `<div style="opacity:.5">${msg}</div>` : ''}</div>`;
   }
   if (!msg) return '';
-  const flags = (c.flags || []).length ? `<div class="row" style="margin-bottom:6px">${c.flags.map((f) => `<span class="badge skipped">⚠️ ${esc(f)}</span>`).join('')}</div>` : '';
-  return `<div class="card coach"><div class="coach-h"><span>🧠 Koç</span><small class="muted">${when}</small></div>${flags}${msg}</div>`;
+  const flags = (c.flags || []).length ? `<div>${c.flags.map((f) => `<span class="flag">⚠️ ${esc(f)}</span>`).join('')}</div>` : '';
+  return `<div class="card coach"><div class="coach-h"><span><span class="av">🧠</span>Koç</span><small class="muted">${when}</small></div>${flags}${msg}</div>`;
 }
 
-function bar(label, val, target, unit) {
-  const pct = target ? Math.min(100, (val / target) * 100) : 0;
-  const over = target && val > target * 1.05;
-  return `<div class="bar ${over ? 'over' : ''}"><div class="lbl"><span>${label}</span><span>${Math.round(val)} / ${target} ${unit}</span></div>
-    <div class="track"><div class="fill" style="width:${pct}%"></div></div></div>`;
+function macroRow(key, label, val, target, color) {
+  return `<div class="macro-row">${ring(key, val, target, { size: 46, stroke: 6, color })}
+    <div class="lbl"><span class="muted">${label}</span><b>${cnt(key, Math.round(val))} <small class="muted">/ ${target} g</small></b></div></div>`;
 }
 
 function renderNutrition(el, date, day) {
   const t = totals(day);
   const tg = S.plans.targets;
+  const left = tg.kcal - t.kcal;
   const meals = [...day.meals].sort((a, b) => (a.time || '99').localeCompare(b.time || '99'));
   el.innerHTML = `
     <div class="card">
-      ${bar('Kalori', t.kcal, tg.kcal, 'kcal')}
-      ${bar('Protein', t.p, tg.p, 'g')}
-      <div class="grid2">${bar('Karb.', t.c, tg.c, 'g')}${bar('Yağ', t.f, tg.f, 'g')}</div>
-      ${t.unknown ? `<small class="muted">+ ${t.unknown} öğünün makrosunu koç hesaplayacak</small>` : ''}
+      <div class="hero">
+        ${ring('kcal', t.kcal, tg.kcal, { size: 138, stroke: 13, center: `<b>${cnt('kcal', Math.round(t.kcal))}</b><small>/ ${tg.kcal}</small><span>kcal</span>` })}
+        <div class="macros">
+          ${macroRow('p', 'Protein', t.p, tg.p, 'var(--p)')}
+          ${macroRow('c', 'Karbonhidrat', t.c, tg.c, 'var(--c)')}
+          ${macroRow('f', 'Yağ', t.f, tg.f, 'var(--f)')}
+        </div>
+      </div>
+      <div class="left-pill">${left >= 0 ? `Kalan <b>${cnt('left', left)}</b> kcal` : `Hedefin <b>${cnt('left', -left)}</b> kcal üstünde`}
+        ${t.unknown ? `<br><small class="muted">+ ${t.unknown} öğünün makrosunu koç hesaplayacak</small>` : ''}</div>
     </div>
     ${meals.map(mealCard).join('') || '<div class="empty-state">Bu gün için plan yok.</div>'}
     <div class="card" id="extra-form">
@@ -293,6 +386,7 @@ function renderNutrition(el, date, day) {
         return;
       }
       const next = m.status === status ? 'planned' : status;
+      if (next === 'eaten') { A.flash = id; vibrate(15); }
       busy(b, async () => {
         await updateDay(date, `${m.name}: ${{ eaten: 'yendi', skipped: 'atlandı', planned: 'geri alındı' }[next]}`, (d) => {
           d.meals.find((x) => x.id === id).status = next;
@@ -340,12 +434,17 @@ function mealCard(m) {
        <button class="btn sm ${m.status === 'skipped' ? 'on' : ''}" data-act="meal-status" data-status="skipped" data-id="${m.id}">Atladım</button>
        <button class="btn sm" data-act="meal-status" data-status="replaced" data-id="${m.id}">Başka şey yedim</button>`
     : `<button class="btn sm danger" data-act="meal-del" data-id="${m.id}">Sil</button>`;
-  return `<div class="meal ${m.status}">
-    <div class="meal-h"><span class="time">${esc(m.time || '')}</span><b>${esc(m.name)}</b>
-      ${m.source === 'extra' ? '<span class="badge extra">Plan dışı</span>' : ''}
-      ${statusLbl ? `<span class="badge ${m.status}">${statusLbl}</span>` : ''}</div>
-    ${items}<div class="macro">${macro}</div><div class="row">${actions}</div></div>`;
+  const flash = A.flash === m.id ? 'flash' : '';
+  return `<div class="meal ${m.status} ${flash}">
+    <div class="emo">${m.status === 'eaten' ? '✅' : SLOT_EMO[m.slot] || '🍴'}</div>
+    <div class="body">
+      <div class="meal-h"><b>${esc(m.name)}</b><span class="time">${esc(m.time || '')}</span>
+        ${m.source === 'extra' ? '<span class="badge extra">Plan dışı</span>' : ''}
+        ${statusLbl ? `<span class="badge ${m.status}">${statusLbl}</span>` : ''}</div>
+      ${items}<div class="macro">${macro}</div><div class="row">${actions}</div>
+    </div></div>`;
 }
+const SLOT_EMO = { kahvalti: '🍳', ogle: '🥗', ara: '🍌', aksam: '🍽️', gece: '🌙', diger: '🍴' };
 
 function setRow(i, s = {}) {
   return `<tr><td>${i + 1}</td>
@@ -356,9 +455,9 @@ function setRow(i, s = {}) {
 
 function renderWorkout(el, date, day) {
   const w = day.workout || { title: 'Dinlenme günü', exercises: [] };
-  const exHtml = w.exercises.map((e) => `
+  const exHtml = w.exercises.map((e, i) => `
     <div class="ex" data-ex="${e.id}">
-      <div class="ex-h"><b>${esc(e.name)}</b>
+      <div class="ex-h"><span class="ex-num">${i + 1}</span><b>${esc(e.name)}</b>
         ${e.source === 'extra' ? '<span class="badge extra">Ekstra</span>' : ''}
         ${e.target ? `<span class="badge">${esc(e.target)}</span>` : ''}
         ${e.source === 'extra' ? `<button class="btn sm danger" data-act="del-ex" data-id="${e.id}">Sil</button>` : ''}</div>
@@ -372,7 +471,8 @@ function renderWorkout(el, date, day) {
       ${!w.planId && !w.exercises.length ? '<p class="muted" style="margin:8px 0 0">Bugün plan yok. Toparlan, 8-10 bin adım yeter. Yine de bir şey yaptıysan aşağıdan ekle.</p>' : ''}</div>
     ${exHtml}
     ${w.exercises.length ? `
-      <label class="row" style="margin:6px 0 10px"><input type="checkbox" id="w-done" style="width:auto" ${w.done ? 'checked' : ''}> Antrenman bitti</label>
+      <label class="done-toggle"><span>🏁 Antrenman bitti</span>
+        <span class="switch"><input type="checkbox" id="w-done" ${w.done ? 'checked' : ''}><span></span></span></label>
       <button class="btn primary full" data-act="save-workout">💾 Antrenmanı kaydet</button>` : ''}
     <div class="card" style="margin-top:12px">
       <h3>➕ Programda olmayan hareket ekle</h3>
@@ -400,6 +500,8 @@ function renderWorkout(el, date, day) {
       const last = tbody.lastElementChild;
       const prev = last ? { kg: $('[data-k=kg]', last).value, reps: $('[data-k=reps]', last).value } : {};
       tbody.insertAdjacentHTML('beforeend', setRow(tbody.children.length, prev));
+      tbody.lastElementChild.classList.add('new');
+      vibrate(8);
     } else if (act === 'del-set') {
       const tr = b.closest('tr');
       const tbody = tr.parentElement;
@@ -414,7 +516,7 @@ function renderWorkout(el, date, day) {
           for (const ex of d.workout.exercises) if (sets[ex.id]) ex.sets = sets[ex.id];
           d.workout.done = done;
         });
-        toast('Kaydedildi 💪');
+        if (done && !w.done) { confetti(); vibrate([20, 40, 20]); toast('Antrenman tamam, helal olsun 🔥'); } else toast('Kaydedildi 💪');
         rerender();
       });
     } else if (act === 'add-ex') {
@@ -510,11 +612,11 @@ async function viewCalendar(ym, mode) {
   const prev = new Date(Date.UTC(y, mo - 2, 1)).toISOString().slice(0, 7);
   const next = new Date(Date.UTC(y, mo, 1)).toISOString().slice(0, 7);
   const label = new Date(Date.UTC(y, mo - 1, 15)).toLocaleDateString('tr-TR', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-  setTop(`<button class="icon" data-href="#/takvim/${prev}/${mode}">‹</button>
+  setTop(`<button class="icon" data-href="#/takvim/${prev}/${mode}" data-dir="from-left">‹</button>
     <div class="title"><b>${label}</b></div>
-    <button class="icon" data-act="refresh">⟳</button>
-    <button class="icon" data-href="#/takvim/${next}/${mode}">›</button>`);
-  view().innerHTML = '<div class="loading">Yükleniyor…</div>';
+    ${refreshBtn()}
+    <button class="icon" data-href="#/takvim/${next}/${mode}" data-dir="from-right">›</button>`);
+  if (!S.summary) view().innerHTML = skeleton(48, 380);
   await loadPlans();
   const sum = await loadSummary();
   for (const [d, v] of Object.entries(S.days)) if (d.startsWith(ym) && v.sha) sum.days[d] = summarize(v.data);
@@ -550,7 +652,7 @@ async function viewCalendar(ym, mode) {
       if (s?.workout?.extra) dots += '<span style="color:var(--extra)">＋</span>';
     }
     if (s?.pending) dots += '⏳';
-    cells += `<a class="c ${cls} ${d === today ? 'today' : ''} ${future ? 'future' : ''}" href="#/gun/${d}/${mode === 'yemek' ? 'beslenme' : 'antrenman'}">
+    cells += `<a class="c ${cls} ${d === today ? 'today' : ''} ${future ? 'future' : ''}" style="--i:${n + offset}" href="#/gun/${d}/${mode === 'yemek' ? 'beslenme' : 'antrenman'}">
       <span class="n">${n}</span><span class="v">${v}</span><span class="dots">${dots}</span></a>`;
   }
 
@@ -564,10 +666,7 @@ async function viewCalendar(ym, mode) {
        <span><span style="color:var(--extra)">＋</span> Ekstra hareket</span>`;
 
   view().innerHTML = `
-    <div class="seg">
-      <button class="${mode === 'yemek' ? 'on' : ''}" data-href="#/takvim/${ym}/yemek">🍽 Yemek</button>
-      <button class="${mode === 'spor' ? 'on' : ''}" data-href="#/takvim/${ym}/spor">🏋️ Spor</button>
-    </div>
+    ${seg('cal', [[`#/takvim/${ym}/yemek`, '🍽 Yemek'], [`#/takvim/${ym}/spor`, '🏋️ Spor']], mode === 'yemek' ? 0 : 1)}
     <div class="cal">${['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'].map((w) => `<div class="wd">${w}</div>`).join('')}${cells}</div>
     <div class="legend">${legend}</div>
     ${monthStats(sum, ym, mode)}`;
@@ -580,21 +679,21 @@ function monthStats(sum, ym, mode) {
     const logged = days.filter((d) => d.kcal > 0);
     const avg = (k) => (logged.length ? Math.round(logged.reduce((a, d) => a + (d[k] || 0), 0) / logged.length) : 0);
     return `<div class="stats" style="margin-top:12px">
-      <div class="stat"><div class="k">Ort. kalori</div><div class="v">${avg('kcal')}</div></div>
-      <div class="stat"><div class="k">Ort. protein</div><div class="v">${avg('p')} g</div></div>
-      <div class="stat"><div class="k">Kayıtlı gün</div><div class="v">${logged.length}</div></div>
-      <div class="stat"><div class="k">Plan dışı öğün</div><div class="v">${days.reduce((a, d) => a + (d.extraMeals || 0), 0)}</div></div></div>`;
+      <div class="stat"><div class="k">Ort. kalori</div><div class="v">${cnt('m-kcal', avg('kcal'))}</div></div>
+      <div class="stat"><div class="k">Ort. protein</div><div class="v">${cnt('m-p', avg('p'))} <small>g</small></div></div>
+      <div class="stat"><div class="k">Kayıtlı gün</div><div class="v">${cnt('m-days', logged.length)}</div></div>
+      <div class="stat"><div class="k">Plan dışı öğün</div><div class="v">${cnt('m-extra', days.reduce((a, d) => a + (d.extraMeals || 0), 0))}</div></div></div>`;
   }
   const done = days.filter((d) => d.workout?.done).length;
   return `<div class="stats" style="margin-top:12px">
-    <div class="stat"><div class="k">Yapılan antrenman</div><div class="v">${done}</div></div>
-    <div class="stat"><div class="k">Toplam set</div><div class="v">${days.reduce((a, d) => a + (d.workout?.sets || 0), 0)}</div></div></div>`;
+    <div class="stat"><div class="k">Yapılan antrenman</div><div class="v">${cnt('m-done', done)}</div></div>
+    <div class="stat"><div class="k">Toplam set</div><div class="v">${cnt('m-sets', days.reduce((a, d) => a + (d.workout?.sets || 0), 0))}</div></div></div>`;
 }
 
 // ---------- İlerleme ----------
 async function viewProgress() {
-  setTop('<h1>İlerleme</h1><button class="icon" data-act="refresh">⟳</button>');
-  view().innerHTML = '<div class="loading">Yükleniyor…</div>';
+  setTop(`<h1>İlerleme</h1>${refreshBtn()}`);
+  if (!S.summary) view().innerHTML = skeleton(170, 230, 120);
   await loadPlans();
   const sum = await loadSummary();
   const series = sum.weight || [];
@@ -611,11 +710,11 @@ async function viewProgress() {
   }
 
   view().innerHTML = `
-    <div class="stats">
-      <div class="stat"><div class="k">7 günlük ortalama</div><div class="v">${tr?.avg7 ?? '—'} <small>kg</small></div></div>
-      <div class="stat"><div class="k">Haftalık değişim</div><div class="v ${cls(tr?.weeklyChange)}">${sign(tr?.weeklyChange)} <small>kg</small></div></div>
-      <div class="stat"><div class="k">Toplam</div><div class="v ${cls(tr?.totalChange)}">${sign(tr?.totalChange)} <small>kg</small></div></div>
-      <div class="stat"><div class="k">Bel</div><div class="v">${waist.at(-1)?.v ?? '—'} <small>cm</small></div>
+    <div class="stats stagger">
+      <div class="stat" style="--i:0"><div class="k">7 günlük ortalama</div><div class="v">${tr?.avg7 != null ? cnt('avg7', tr.avg7, 1) : '—'} <small>kg</small></div></div>
+      <div class="stat" style="--i:1"><div class="k">Haftalık değişim</div><div class="v ${cls(tr?.weeklyChange)}">${tr?.weeklyChange != null ? cnt('wk', tr.weeklyChange, 1, true) : '—'} <small>kg</small></div></div>
+      <div class="stat" style="--i:2"><div class="k">Toplam</div><div class="v ${cls(tr?.totalChange)}">${tr?.totalChange != null ? cnt('tot', tr.totalChange, 1, true) : '—'} <small>kg</small></div></div>
+      <div class="stat" style="--i:3"><div class="k">Bel</div><div class="v">${waist.length ? cnt('waist', waist.at(-1).v, 1) : '—'} <small>cm</small></div>
         ${waist.length > 1 ? `<small class="${cls(waist.at(-1).v - waist[0].v)}">${sign(+(waist.at(-1).v - waist[0].v).toFixed(1))} cm başlangıca göre</small>` : ''}</div>
     </div>
     <div class="card"><h3>Kilo</h3>${weightChart(series)}
@@ -639,10 +738,14 @@ function weightChart(pts) {
   const step = Math.max(1, Math.round((max - min) / 4));
   for (let v = min; v <= max; v += step) grid.push(`<line x1="${P.l}" x2="${W - P.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/><text x="${P.l - 4}" y="${y(v) + 3}" text-anchor="end">${v}</text>`);
   const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.date).toFixed(1)},${y(p.avg7).toFixed(1)}`).join('');
-  const dots = pts.map((p) => `<circle cx="${x(p.date)}" cy="${y(p.w)}" r="2.5" fill="var(--muted)"/>`).join('');
+  const area = `${line}L${x(pts.at(-1).date).toFixed(1)},${H - P.b}L${x(pts[0].date).toFixed(1)},${H - P.b}Z`;
+  const dots = pts.map((p, i) => `<circle cx="${x(p.date)}" cy="${y(p.w)}" r="3" fill="var(--muted)" style="--i:${i}"/>`).join('');
   const lbl = (d) => new Date(`${d}T12:00:00Z`).toLocaleDateString('tr-TR', { day: 'numeric', month: 'short', timeZone: 'UTC' });
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Kilo grafiği">${grid.join('')}${dots}
-    <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round"/>
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Kilo grafiği">
+    <defs><linearGradient id="wg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#22c55e" stop-opacity=".35"/><stop offset="1" stop-color="#22c55e" stop-opacity="0"/></linearGradient>
+      <linearGradient id="wl" x1="0" x2="1"><stop offset="0" stop-color="#22c55e"/><stop offset="1" stop-color="#38bdf8"/></linearGradient></defs>
+    ${grid.join('')}<path class="area" d="${area}" fill="url(#wg)"/>${dots}
+    <path class="line" d="${line}" fill="none" stroke="url(#wl)" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
     <text x="${P.l}" y="${H - 4}">${lbl(pts[0].date)}</text><text x="${W - P.r}" y="${H - 4}" text-anchor="end">${lbl(pts.at(-1).date)}</text></svg>`;
 }
 
@@ -701,13 +804,27 @@ async function viewSettings() {
 }
 
 // ---------- Yönlendirme ----------
-let current = () => {};
-function rerender() { current(); }
+let current = async () => {};
+// Kaydetme sonrası yeniden çizim: giriş animasyonu yok, halkalar/sayılar eski değerden akar
+async function rerender() {
+  A.quiet = true;
+  try { await current(); } finally { A.quiet = false; A.flash = null; }
+}
+
+const TAB_INDEX = { gun: 0, takvim: 1, ilerleme: 2, ayarlar: 3 };
 
 async function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/');
   const page = parts[0] || 'gun';
-  $$('#tabs a').forEach((a) => a.classList.toggle('on', a.dataset.tab === page && (page !== 'gun' || !parts[1] || parts[1] === todayStr())));
+  let active = -1;
+  $$('#tabs a').forEach((a) => {
+    const on = a.dataset.tab === page && (page !== 'gun' || !parts[1] || parts[1] === todayStr());
+    a.classList.toggle('on', on);
+    if (on) active = TAB_INDEX[page];
+  });
+  const nav = $('#tabs');
+  if (active >= 0) nav.style.setProperty('--tab', active);
+  $('.ind', nav).style.opacity = active >= 0 ? 1 : 0;
   if (!cfg.repo || (!cfg.token && !isDemo())) {
     if (page !== 'ayarlar') { location.hash = '#/ayarlar'; return; }
   }
@@ -723,19 +840,55 @@ async function route() {
       console.error(e);
       view().innerHTML = `<div class="card" style="color:var(--bad)">⚠️ ${esc(e.message)}<br><small class="muted">İnternet bağlantını ve Ayarlar'daki token'ı kontrol et.</small></div>`;
     }
+    animateIn(view());
+    A.dir = '';
   };
-  current();
-  window.scrollTo(0, 0);
+  window.scrollTo({ top: 0, behavior: 'instant' });
+  await current();
 }
 
-document.addEventListener('click', (e) => {
+document.addEventListener('click', async (e) => {
   const h = e.target.closest('[data-href]');
-  if (h) { location.hash = h.dataset.href; return; }
+  if (h) { A.dir = h.dataset.dir || ''; vibrate(6); location.hash = h.dataset.href; return; }
   if (e.target.closest('[data-act=refresh]')) {
     S.days = {}; S.summary = null; S.plans = null;
-    rerender();
-    toast('Yenilendi');
+    A.loading = true;
+    e.target.closest('[data-act=refresh]').classList.add('spin');
+    await rerender();
+    A.loading = false;
+    $('[data-act=refresh]')?.classList.remove('spin');
+    toast('Yenilendi ✨');
   }
 });
+
+// Butonlarda dokunma dalgası
+document.addEventListener('pointerdown', (e) => {
+  const b = e.target.closest('.btn');
+  if (!b || reduced) return;
+  const r = b.getBoundingClientRect();
+  const s = Math.max(r.width, r.height);
+  const w = document.createElement('span');
+  w.className = 'ripple';
+  Object.assign(w.style, { width: `${s}px`, height: `${s}px`, left: `${e.clientX - r.left - s / 2}px`, top: `${e.clientY - r.top - s / 2}px` });
+  b.appendChild(w);
+  setTimeout(() => w.remove(), 600);
+});
+
+// Sağa/sola kaydırma: gün ekranında gün, takvimde ay değiştirir (üstte oklar olan her ekranda)
+let touch = null;
+document.addEventListener('touchstart', (e) => {
+  const t = e.touches[0];
+  touch = t && !e.target.closest('input, textarea, select, .sets') ? { x: t.clientX, y: t.clientY, at: Date.now() } : null;
+}, { passive: true });
+document.addEventListener('touchend', (e) => {
+  if (!touch) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - touch.x, dy = t.clientY - touch.y;
+  touch = null;
+  if (Math.abs(dx) < 70 || Math.abs(dy) > 50) return;
+  const btn = $(`#top [data-dir="${dx < 0 ? 'from-right' : 'from-left'}"]`);
+  if (btn) { A.dir = btn.dataset.dir; vibrate(8); location.hash = btn.dataset.href; }
+}, { passive: true });
+
 window.addEventListener('hashchange', route);
 route();
