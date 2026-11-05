@@ -21,6 +21,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch { /* özel sekme */ } },
+  del(k) { try { localStorage.removeItem(k); } catch { /* özel sekme */ } },
 };
 const cfg = {
   get token() { return store.get('pt.token') || ''; },
@@ -34,8 +35,10 @@ const enc = (s) => { let b = ''; new TextEncoder().encode(s).forEach((x) => { b 
 const dec = (b64) => new TextDecoder().decode(Uint8Array.from(atob(b64.replace(/\n/g, '')), (c) => c.charCodeAt(0)));
 const demoFiles = {};
 
-async function gh(path, opts = {}) {
-  const r = await fetch(`https://api.github.com/repos/${cfg.repo}${path}`, {
+const gh = (path, opts) => ghAt(cfg.repo, path, opts);
+
+async function ghAt(repo, path, opts = {}) {
+  const r = await fetch(`https://api.github.com/repos/${repo}${path}`, {
     cache: 'no-store',
     ...opts,
     headers: {
@@ -52,6 +55,41 @@ async function gh(path, opts = {}) {
     throw e;
   }
   return r.json();
+}
+
+// ---------- Şifreyle giriş ----------
+// Token, şifreden türetilen anahtarla (PBKDF2-SHA256 + AES-GCM) şifrelenip uygulama reposunda auth.json olarak durur.
+// Şifre ve çözülmüş token cihazdan hiç çıkmaz: yeni cihazda kullanıcı adı + şifre, token'ı tarayıcının içinde açar.
+const AUTH_ITER = 600000;
+const b64e = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const b64d = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+
+async function authKey(password, salt, iterations) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
+async function sealAuth(user, password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await authKey(password, salt, AUTH_ITER);
+  const secret = new TextEncoder().encode(JSON.stringify({ token: cfg.token, repo: cfg.repo }));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, secret);
+  return { v: 1, user, iter: AUTH_ITER, salt: b64e(salt), iv: b64e(iv), ct: b64e(ct), createdAt: new Date().toISOString() };
+}
+
+// Yanlış şifrede AES-GCM doğrulaması başarısız olur ve hata fırlatır
+async function openAuth(blob, password) {
+  const key = await authKey(password, b64d(blob.salt), blob.iter);
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(blob.iv) }, key, b64d(blob.ct));
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
+// Uygulamanın kendi reposu: dreyfust.github.io/pt-app → dreyfust/pt-app
+function appRepo() {
+  const host = location.hostname.match(/^([^.]+)\.github\.io$/i);
+  const seg = location.pathname.split('/').filter(Boolean)[0];
+  return host && seg ? `${host[1]}/${seg}` : null;
 }
 
 async function readJSON(path) {
@@ -200,9 +238,9 @@ function md(s) {
   }
   return out + (inList ? '</ul>' : '');
 }
-async function busy(btn, fn) {
+async function busy(btn, fn, working = 'Kaydediliyor…') {
   const label = btn?.textContent;
-  if (btn) { btn.disabled = true; btn.textContent = 'Kaydediliyor…'; }
+  if (btn) { btn.disabled = true; btn.textContent = working; }
   try { await fn(); } catch (e) { toast(`⚠️ ${e.message}`); console.error(e); } finally {
     if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = label; }
   }
@@ -718,11 +756,77 @@ function weightChart(pts) {
     <text x="${P.l}" y="${H - 4}">${lbl(pts[0].date)}</text><text x="${W - P.r}" y="${H - 4}" text-anchor="end">${lbl(pts.at(-1).date)}</text></svg>`;
 }
 
+// ---------- Giriş ----------
+async function viewLogin() {
+  setTop('');
+  const owner = appRepo()?.split('/')[0] || '';
+  view().innerHTML = `
+    <div class="login">
+      <div class="logo"><img src="icon.svg" alt=""></div>
+      <h1>PT Koç</h1>
+      <p class="muted">Kişisel antrenörün</p>
+      <div class="card" id="l-card">
+        <label class="f" for="l-user">Kullanıcı adı</label>
+        <input id="l-user" autocomplete="username" autocapitalize="off" spellcheck="false" value="${esc(store.get('pt.user') || owner)}">
+        <label class="f" for="l-pass">Şifre</label>
+        <input id="l-pass" type="password" autocomplete="current-password">
+        <button class="btn primary full" data-act="login" style="margin-top:14px">Giriş yap</button>
+        <div id="l-status" class="muted l-status"></div>
+      </div>
+      <a href="#/ayarlar" class="muted l-alt">Token ile bağlan (gelişmiş)</a>
+    </div>`;
+
+  const status = (msg, bad) => { const s = $('#l-status'); s.textContent = msg; s.classList.toggle('bad', !!bad); };
+  const fail = (msg) => {
+    status(msg, true);
+    const card = $('#l-card');
+    card.classList.remove('shake'); void card.offsetWidth; card.classList.add('shake');
+    vibrate([30, 40, 30]);
+  };
+  const login = async (btn) => {
+    const user = $('#l-user').value.trim();
+    const pass = $('#l-pass').value;
+    if (!user || !pass) { fail('Kullanıcı adı ve şifreyi gir'); return; }
+    await busy(btn, async () => {
+      status('Kontrol ediliyor…');
+      const r = await fetch(`auth.json?t=${Date.now()}`, { cache: 'no-store' });
+      if (!r.ok) { fail('Bu uygulamada henüz şifre belirlenmemiş. Bağlı olduğun cihazda Ayarlar → Şifreyle giriş bölümünden belirle.'); return; }
+      const blob = await r.json();
+      let secret = null;
+      if (norm(blob.user) === norm(user)) secret = await openAuth(blob, pass).catch(() => null);
+      if (!secret) { fail('Kullanıcı adı veya şifre hatalı'); return; }
+      store.set('pt.token', secret.token);
+      store.set('pt.repo', secret.repo);
+      store.set('pt.user', user);
+      S.plans = null; S.summary = null; S.days = {};
+      vibrate(15);
+      toast(`Hoş geldin ${user} 💪`);
+      location.hash = '#/gun';
+    }, 'Giriş yapılıyor…');
+  };
+  view().onclick = (e) => { const b = e.target.closest('[data-act=login]'); if (b) login(b); };
+  $('#l-pass').onkeydown = (e) => { if (e.key === 'Enter') login($('[data-act=login]')); };
+  if ($('#l-user').value) $('#l-pass').focus();
+}
+
 // ---------- Ayarlar ----------
 async function viewSettings() {
   setTop('<h1>Ayarlar</h1>');
   const connected = cfg.token || isDemo();
+  const repoForAuth = appRepo();
+  const authCard = cfg.token && repoForAuth ? `
+    <div class="card">
+      <h3>🔐 Şifreyle giriş</h3>
+      <small class="muted">Bir şifre belirle, diğer cihazlarda token yerine kullanıcı adı ve şifreyle gir. Token bu şifreyle şifrelenip uygulamanın (herkese açık) reposunda saklanır, şifrenin kendisi hiçbir yere gönderilmez. Bu yüzden <b>en az 10 karakterlik, başka yerde kullanmadığın</b> bir şifre seç.</small>
+      <label class="f" for="a-user">Kullanıcı adı</label><input id="a-user" autocomplete="username" autocapitalize="off" value="${esc(store.get('pt.user') || repoForAuth.split('/')[0])}">
+      <label class="f" for="a-p1">Yeni şifre</label><input id="a-p1" type="password" autocomplete="new-password">
+      <label class="f" for="a-p2">Yeni şifre (tekrar)</label><input id="a-p2" type="password" autocomplete="new-password">
+      <button class="btn primary full" data-act="set-pass" style="margin-top:12px">Şifreyi kaydet</button>
+      <div id="a-status" class="muted" style="margin-top:8px"></div>
+    </div>` : '';
   view().innerHTML = `
+    ${authCard}
+    ${cfg.token ? '<button class="btn danger full" data-act="logout" style="margin-bottom:12px">Bu cihazda çıkış yap</button>' : ''}
     <div class="card">
       <h3>🔑 GitHub bağlantısı</h3>
       <small class="muted">Token yalnızca bu cihazın tarayıcısında saklanır. Sadece veri reposuna "Contents: Read and write" yetkisi olan fine-grained token kullan.</small>
@@ -745,6 +849,37 @@ async function viewSettings() {
         $('#s-status').innerHTML = '<span style="color:var(--accent)">✓ Bağlandı</span>';
         setTimeout(() => { location.hash = '#/gun'; }, 600);
       });
+    } else if (b.dataset.act === 'set-pass') {
+      const user = $('#a-user').value.trim();
+      const p1 = $('#a-p1').value;
+      const p2 = $('#a-p2').value;
+      const st = $('#a-status');
+      if (!user) { toast('Kullanıcı adını yaz'); return; }
+      if (p1.length < 10) { toast('Şifre en az 10 karakter olsun'); return; }
+      if (p1 !== p2) { toast('Şifreler aynı değil'); return; }
+      busy(b, async () => {
+        const blob = await sealAuth(user, p1);
+        const body = { message: 'Şifreyle giriş: auth.json güncellendi', branch: 'main', content: enc(`${JSON.stringify(blob, null, 2)}\n`) };
+        try {
+          const cur = await ghAt(repoForAuth, '/contents/auth.json?ref=main');
+          await ghAt(repoForAuth, '/contents/auth.json', { method: 'PUT', body: JSON.stringify({ ...body, ...(cur ? { sha: cur.sha } : {}) }) });
+        } catch (e) {
+          if (e.status === 403 || e.status === 404) {
+            st.innerHTML = `<span style="color:var(--bad)">⚠️ Token'ın <b>${esc(repoForAuth)}</b> reposuna yazma izni yok.</span><br>GitHub → Settings → Developer settings → Fine-grained tokens → bu token → <b>Repository access</b>'e <b>${esc(repoForAuth.split('/')[1])}</b>'i ekle (Contents: Read and write), kaydet ve tekrar dene.`;
+            return;
+          }
+          throw e;
+        }
+        store.set('pt.user', user);
+        $('#a-p1').value = ''; $('#a-p2').value = '';
+        st.innerHTML = '<span style="color:var(--accent)">✓ Kaydedildi.</span> 1-2 dakika sonra diğer cihazlarda kullanıcı adı ve şifreyle giriş yapabilirsin.';
+        vibrate(15);
+      });
+    } else if (b.dataset.act === 'logout') {
+      if (!confirm('Bu cihazdaki bağlantı silinsin mi? Tekrar girmek için kullanıcı adı ve şifre gerekecek.')) return;
+      store.del('pt.token'); store.del('pt.repo');
+      S.plans = null; S.summary = null; S.days = {};
+      location.hash = '#/giris';
     } else if (b.dataset.act === 'save-profile') {
       const height = num($('#p-height').value);
       busy(b, async () => {
@@ -1203,10 +1338,12 @@ async function route() {
   if (active >= 0) nav.style.setProperty('--tab', active);
   $('.ind', nav).style.opacity = active >= 0 ? 1 : 0;
   if (!cfg.repo || (!cfg.token && !isDemo())) {
-    if (page !== 'ayarlar') { location.hash = '#/ayarlar'; return; }
+    if (page !== 'ayarlar' && page !== 'giris') { location.hash = '#/giris'; return; }
   }
+  document.body.classList.toggle('auth', page === 'giris');
   view().onclick = null;
   const run = {
+    giris: () => viewLogin(),
     gun: () => viewDay(parts[1] || todayStr(), parts[2]),
     takvim: () => viewCalendar(parts[1], parts[2]),
     ilerleme: () => viewProgress(),

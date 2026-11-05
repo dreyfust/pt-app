@@ -237,6 +237,20 @@ svg.chart circle { animation: pop .4s var(--spring) both; animation-delay: calc(
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
 .empty-state { text-align: center; color: var(--muted); padding: 24px 8px; }
 
+/* Giriş ekranı */
+body.auth #tabs, body.auth #top { display: none; }
+.login { min-height: calc(100vh - 140px); display: flex; flex-direction: column; justify-content: center; text-align: center; padding-top: 40px; }
+.login .logo { width: 84px; height: 84px; margin: 0 auto 14px; border-radius: 26px; overflow: hidden; box-shadow: 0 16px 40px -10px rgba(34, 197, 94, .6); animation: pop .6s var(--spring) both, bob 3s ease-in-out .6s infinite; }
+.login .logo img { width: 100%; height: 100%; display: block; }
+.login h1 { margin: 0; font-size: 30px; font-weight: 800; letter-spacing: -.03em; }
+.login > p { margin: 4px 0 22px; }
+.login .card { text-align: left; }
+.l-status { margin-top: 10px; min-height: 20px; font-size: 13px; text-align: center; }
+.l-status.bad { color: var(--bad); }
+.l-alt { font-size: 13px; text-decoration: none; margin-top: 6px; }
+.shake { animation: shake .45s var(--out); }
+@keyframes shake { 20%, 60% { transform: translateX(-8px); } 40%, 80% { transform: translateX(8px); } }
+
 /* Büyük ekleme butonu */
 .add-big { margin-bottom: 12px; font-size: 16px; letter-spacing: .01em; }
 .last-hint { display: block; margin: 0 0 4px; }
